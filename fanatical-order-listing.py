@@ -269,6 +269,46 @@ def download_bundles(json_path, count, token):
     print(f"Updated {json_path} after downloading.")
 
 
+def refresh_signed_urls(json_path, token):
+    if not os.path.exists(json_path):
+        print(f"JSON file {json_path} does not exist. Please run with --books first to create it.")
+        return
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    bundles = data.get('bundles', [])
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "Mozilla/5.0 (compatible; fanatical-order-listing/1.0)"
+    }
+    from urllib.parse import urlparse, parse_qs
+    updated = 0
+    for bundle in bundles:
+        for book in bundle.get('books', []):
+            for file in book.get('files', []):
+                api_url = file.get('api_download')
+                if not api_url:
+                    continue
+                try:
+                    resp = requests.get(api_url, headers=headers)
+                    resp.raise_for_status()
+                    signed_data = resp.json()
+                    signed_url = signed_data.get('signedGetUrl')
+                    if not signed_url:
+                        print(f"No signed URL found for {api_url}")
+                        continue
+                    parsed_url = urlparse(signed_url)
+                    query_params = parse_qs(parsed_url.query)
+                    expiration_date = query_params.get('X-Amz-Date', [None])[0]
+                    file['signed_url'] = signed_url
+                    file['expiration_date'] = expiration_date
+                    updated += 1
+                except Exception as e:
+                    print(f"Failed to refresh {api_url}: {e}")
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    print(f"Refreshed signed URLs for {updated} files in {json_path}.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="List Fanatical orders as JSON.")
     parser.add_argument("--token", help="Bearer token for authentication (overrides $FANATICAL_BEARER_TOKEN)")
@@ -276,9 +316,14 @@ def main():
     parser.add_argument("--details", action="store_true", help="Fetch full details for each order and save to fanatical-order-details.json")
     parser.add_argument("--books", action="store_true", help="Extract book details and save to fanatical-book-details.json in detailed_catalog.json format")
     parser.add_argument("--download", "-d", nargs="?", const=1, type=int, help="Download the first X not-yet-downloaded bundles (default 1)")
+    parser.add_argument("--refresh", "-r", action="store_true", help="Refresh all signed URLs and expiration dates in fanatical-book-details.json")
     parser.add_argument("--save-html", metavar="FILE", help=argparse.SUPPRESS)  # Hide unused option
     args = parser.parse_args()
 
+    if args.refresh:
+        token = get_token(args.token)
+        refresh_signed_urls("fanatical-book-details.json", token)
+        return
     if args.download is not None:
         token = get_token(args.token)
         download_bundles("fanatical-book-details.json", args.download, token)
