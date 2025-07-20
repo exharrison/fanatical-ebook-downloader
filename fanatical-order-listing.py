@@ -6,11 +6,13 @@ import requests
 from bs4 import BeautifulSoup
 import json
 import shutil
+import time  # For timestamp formatting
 
 # Constants
 ORDERS_URL = "https://www.fanatical.com/en/orders"
 ORDERS_API_URL = "https://www.fanatical.com/api/user/orders"
 ENV_TOKEN = "FANATICAL_BEARER_TOKEN"
+ENV_DISCORD_WEBHOOK = "DISCORD_WEBHOOK_URL"
 ORDER_DETAIL_API_URL = "https://www.fanatical.com/api/user/orders/{}"
 
 
@@ -198,12 +200,74 @@ def merge_bundles(existing_bundles, new_bundles):
     return merged_bundles
 
 
-def download_bundles(json_path, count, token):
+def send_discord_notification(webhook_url, bundle):
+    """Send a notification to Discord webhook about a new bundle."""
+    spent = bundle.get('total_spent', 0)
+    spent_dollars = spent / 100 if spent > 10 else spent  # fallback for old data
+    embed = {
+        "title": f"New Fanatical Bundle: {bundle.get('name')}",
+        "description": f"**Books:** {bundle.get('book_count', 0)}\n**Spent:** ${spent_dollars:.2f}",
+        "fields": [
+            {"name": "Purchase Date", "value": bundle.get('purchase_date', 'N/A'), "inline": True},
+            {"name": "Bundle ID", "value": bundle.get('_id', 'N/A'), "inline": True},
+        ],
+        "color": 0x00b0f4,
+    }
+    if bundle.get('cover'):
+        embed["thumbnail"] = {"url": bundle['cover']}
+    data = {
+        "embeds": [embed]
+    }
+    try:
+        resp = requests.post(webhook_url, json=data, timeout=10)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"Failed to send Discord notification: {e}", file=sys.stderr)
+
+
+def send_discord_error_notification(webhook_url, error_message):
+    """Send an error notification to Discord webhook."""
+    embed = {
+        "title": "Fanatical Ebook Downloader: Error",
+        "description": f"An error occurred:\n```{error_message}```",
+        "color": 0xff0000,
+    }
+    data = {"embeds": [embed]}
+    try:
+        resp = requests.post(webhook_url, json=data, timeout=10)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"Failed to send Discord error notification: {e}", file=sys.stderr)
+
+
+def send_discord_downloaded_notification(webhook_url, bundle):
+    """Send a notification to Discord webhook when a bundle is downloaded."""
+    spent = bundle.get('total_spent', 0)
+    spent_dollars = spent / 100 if spent > 10 else spent  # fallback for old data
+    embed = {
+        "title": f"Bundle Downloaded: {bundle.get('name')}",
+        "description": f"**Books:** {bundle.get('book_count', 0)}\n**Spent:** ${spent_dollars:.2f}",
+        "fields": [
+            {"name": "Purchase Date", "value": bundle.get('purchase_date', 'N/A'), "inline": True},
+            {"name": "Bundle ID", "value": bundle.get('_id', 'N/A'), "inline": True},
+        ],
+        "color": 0x43b581,  # green
+    }
+    if bundle.get('cover'):
+        embed["thumbnail"] = {"url": bundle['cover']}
+    data = {"embeds": [embed]}
+    try:
+        resp = requests.post(webhook_url, json=data, timeout=10)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"Failed to send Discord download notification: {e}", file=sys.stderr)
+
+
+def download_bundles(json_path, count, token, download_dir=None):
     # Check if JSON file exists, if not create it
     if not os.path.exists(json_path):
         print(f"JSON file {json_path} does not exist. Please run with --books first to create it.")
         return
-    
     with open(json_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
     bundles = data.get('bundles', [])
@@ -211,14 +275,14 @@ def download_bundles(json_path, count, token):
     if not to_download:
         print('No bundles to download.')
         return
-    
     headers = {
         "Authorization": f"Bearer {token}",
         "User-Agent": "Mozilla/5.0 (compatible; fanatical-order-listing/1.0)"
     }
-    
+    # Get Discord webhook URL from env (for download notifications)
+    discord_webhook = os.environ.get("DISCORD_WEBHOOK_URL")
     for bundle in to_download:
-        bundle_dir = os.path.join('fanatical-downloads', bundle['slug'] or bundle['name'].replace(' ', '_'))
+        bundle_dir = os.path.join(download_dir or 'fanatical-downloads', bundle['slug'] or bundle['name'].replace(' ', '_'))
         os.makedirs(bundle_dir, exist_ok=True)
         for book in bundle.get('books', []):
             book_dir = os.path.join(bundle_dir, book['name'].replace(' ', '_'))
@@ -230,39 +294,35 @@ def download_bundles(json_path, count, token):
                 if os.path.exists(dest_path):
                     print(f"Already exists: {dest_path}")
                     continue
-                
                 # Fetch signed URL
                 try:
                     resp = requests.get(api_url, headers=headers)
                     resp.raise_for_status()
                     signed_data = resp.json()
                     signed_url = signed_data.get('signedGetUrl')
-                    
                     if not signed_url:
                         print(f"No signed URL found for {api_url}")
                         continue
-                    
                     # Extract expiration date from signed URL
                     from urllib.parse import urlparse, parse_qs
                     parsed_url = urlparse(signed_url)
                     query_params = parse_qs(parsed_url.query)
                     expiration_date = query_params.get('X-Amz-Date', [None])[0]
-                    
                     # Update file with signed URL and expiration date
                     file['signed_url'] = signed_url
                     file['expiration_date'] = expiration_date
-                    
                     print(f"Downloading {signed_url} -> {dest_path}")
                     with requests.get(signed_url, stream=True) as r:
                         r.raise_for_status()
                         with open(dest_path, 'wb') as out:
                             shutil.copyfileobj(r.raw, out)
-                            
                 except Exception as e:
                     print(f"Failed to download {api_url}: {e}")
         bundle['downloaded'] = True
         print(f"Marked bundle '{bundle['name']}' as downloaded.")
-    
+        # Send Discord notification for downloaded bundle
+        if discord_webhook:
+            send_discord_downloaded_notification(discord_webhook, bundle)
     # Save updated JSON with expiration dates
     with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -316,59 +376,81 @@ def main():
     parser.add_argument("--details", action="store_true", help="Fetch full details for each order and save to fanatical-order-details.json")
     parser.add_argument("--books", action="store_true", help="Extract book details and save to fanatical-book-details.json in detailed_catalog.json format")
     parser.add_argument("--download", "-d", nargs="?", const=1, type=int, help="Download the first X not-yet-downloaded bundles (default 1)")
+    parser.add_argument("--download-dir", metavar="DIR", default="fanatical-downloads", help="Directory to download bundles to (default: fanatical-downloads)")
+    parser.add_argument("--json-file", metavar="FILE", default="fanatical-book-details.json", help="JSON file to use for book details (default: fanatical-book-details.json)")
     parser.add_argument("--refresh", "-r", action="store_true", help="Refresh all signed URLs and expiration dates in fanatical-book-details.json")
+    parser.add_argument("--discord-webhook", help="Discord webhook URL for notifications (overrides $DISCORD_WEBHOOK_URL)")
     parser.add_argument("--save-html", metavar="FILE", help=argparse.SUPPRESS)  # Hide unused option
     args = parser.parse_args()
 
-    if args.refresh:
+    # Get Discord webhook URL from CLI or env
+    discord_webhook = args.discord_webhook or os.environ.get(ENV_DISCORD_WEBHOOK)
+    try:
+        if args.refresh:
+            token = get_token(args.token)
+            refresh_signed_urls(args.json_file, token)
+            return
+        if args.download is not None:
+            token = get_token(args.token)
+            download_bundles(args.json_file, args.download, token, args.download_dir)
+            return
         token = get_token(args.token)
-        refresh_signed_urls("fanatical-book-details.json", token)
-        return
-    if args.download is not None:
-        token = get_token(args.token)
-        download_bundles("fanatical-book-details.json", args.download, token)
-        return
-
-    token = get_token(args.token)
-    orders = fetch_orders_api(token)
-    json_data = json.dumps(orders, indent=2, ensure_ascii=False)
-    if args.details or args.books:
-        details = []
-        for order in orders:
-            order_id = order.get("_id")
-            if order_id:
-                detail = fetch_order_detail(token, order_id)
-                if detail:
-                    details.append(detail)
-        if args.details:
-            with open("fanatical-order-details.json", "w", encoding="utf-8") as f:
-                f.write(json.dumps(details, indent=2, ensure_ascii=False))
-            print("Saved full order details to fanatical-order-details.json")
-        if args.books:
-            bundles = extract_book_bundles_from_order_details(details)
-            
-            # Load existing data and merge
-            existing_data = load_existing_book_details("fanatical-book-details.json")
-            merged_bundles = merge_bundles(existing_data.get('bundles', []), bundles)
-            
-            # Count book bundles (bundles with books of type comic or book)
-            book_bundle_count = sum(1 for bundle in merged_bundles if any(book.get('type') in ('comic', 'book') for book in bundle.get('books', [])))
-            
-            output = {
-                "Book Bundles": book_bundle_count,
-                "All Bundles": len(merged_bundles),
-                "bundles": merged_bundles
-            }
-            with open("fanatical-book-details.json", "w", encoding="utf-8") as f:
-                f.write(json.dumps(output, indent=2, ensure_ascii=False))
-            print("Updated book details in fanatical-book-details.json")
-        return
-    if args.output:
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(json_data)
-        print(f"Saved orders to {args.output}")
-    else:
-        print(json_data)
+        orders = fetch_orders_api(token)
+        json_data = json.dumps(orders, indent=2, ensure_ascii=False)
+        if args.details or args.books:
+            details = []
+            for order in orders:
+                order_id = order.get("_id")
+                if order_id:
+                    detail = fetch_order_detail(token, order_id)
+                    if detail:
+                        details.append(detail)
+            if args.details:
+                with open("fanatical-order-details.json", "w", encoding="utf-8") as f:
+                    f.write(json.dumps(details, indent=2, ensure_ascii=False))
+                print("Saved full order details to fanatical-order-details.json")
+            if args.books:
+                bundles = extract_book_bundles_from_order_details(details)
+                # Load existing data and merge
+                existing_data = load_existing_book_details("fanatical-book-details.json")
+                existing_bundles = existing_data.get('bundles', [])
+                merged_bundles = merge_bundles(existing_bundles, bundles)
+                # Detect new bundles
+                existing_ids = {b['_id'] for b in existing_bundles}
+                new_bundles = [b for b in merged_bundles if b['_id'] not in existing_ids]
+                # Count book bundles (bundles with books of type comic or book)
+                book_bundle_count = sum(1 for bundle in merged_bundles if any(book.get('type') in ('comic', 'book') for book in bundle.get('books', [])))
+                output = {
+                    "Book Bundles": book_bundle_count,
+                    "All Bundles": len(merged_bundles),
+                    "bundles": merged_bundles
+                }
+                with open("fanatical-book-details.json", "w", encoding="utf-8") as f:
+                    f.write(json.dumps(output, indent=2, ensure_ascii=False))
+                print("Updated book details in fanatical-book-details.json")
+                # Send Discord notifications for new bundles
+                if discord_webhook and new_bundles:
+                    for bundle in new_bundles:
+                        send_discord_notification(discord_webhook, bundle)
+            return
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as f:
+                f.write(json_data)
+            print(f"Saved orders to {args.output}")
+        else:
+            print(json_data)
+    except Exception as e:
+        if 'discord_webhook' in locals() and discord_webhook:
+            send_discord_error_notification(discord_webhook, str(e))
+        raise
 
 if __name__ == "__main__":
-    main() 
+    try:
+        main()
+    except SystemExit as e:
+        # If SystemExit is due to error, send Discord notification
+        if e.code and e.code != 0:
+            discord_webhook = os.environ.get("DISCORD_WEBHOOK_URL")
+            if discord_webhook:
+                send_discord_error_notification(discord_webhook, f"Script exited with code {e.code}")
+        raise 

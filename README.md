@@ -228,3 +228,35 @@ This script is provided as-is for personal use. Please respect Fanatical's terms
 ## Contributing
 
 Feel free to submit issues or pull requests for improvements. Please ensure any changes maintain compatibility with Fanatical's API. 
+
+## Discord Notifications
+
+This script can send notifications to a Discord channel via webhook for:
+- **New bundle detected** (when running with `--books`)
+- **Bundle successfully downloaded** (when running with `--download`)
+- **Script errors** (if the script fails or exits with an error)
+
+### How to Provide the Webhook URL
+
+You can provide your Discord webhook URL in three ways:
+1. **Command Line Argument:** `--discord-webhook <URL>`
+2. **Environment Variable:** `DISCORD_WEBHOOK_URL`
+3. **Hardcoded in your shell script** (e.g., in `nightly-update.sh`)
+
+### Example Notification
+- **New Bundle:**
+  > New Fanatical Bundle: [Bundle Name]
+  > Books: 10
+  > Spent: $7.99
+- **Bundle Downloaded:**
+  > Bundle Downloaded: [Bundle Name]
+  > Books: 10
+  > Spent: $7.99
+- **Error:**
+  > Fanatical Ebook Downloader: Error
+  > An error occurred: ...
+
+## Price Formatting
+
+- Prices in notifications are now always shown as dollars and cents (e.g., `$7.99`).
+- Internally, prices are stored as cents (e.g., `799` for $7.99). 
